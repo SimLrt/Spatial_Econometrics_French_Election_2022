@@ -1,29 +1,255 @@
 ---
-title: "Spatial_econometrics_Project"
-output: html_document
-date: "2026-11-10"
+title: "Facteurs associés au vote pour Emmanuel Macron en 2022"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::robobook:
+    highlight: kate
+    number_sections: TRUE
+    df_print: paged
+author: "Lena LEGENDRE, Simon LE RUYET et Louis BOUQUEREL"
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE,
+                      fig.width = 9, fig.height = 5, out.width = "95%")
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(knitr)
+library(corrplot)
+library(car)
+library(sf)
 ```
 
-## R Markdown
+# Introduction
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+## Problématique
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+**Quels facteurs influencent le taux de votes pour Emmanuel Macron en 2022, par département de France métropolitaine ?**
 
-```{r cars}
-summary(cars)
+Ce projet étudie les différences géographiques du vote au premier tour de l’élection présidentielle de 2022. L’objectif final est d’évaluer comment les caractéristiques démographiques, sociales et territoriales des départements sont associées au score d’Emmanuel Macron. Cette première partie est consacrée à la description des données et à leur dimension spatiale ; elle prépare les analyses explicatives qui seront menées dans la suite du projet.
+
+## Sources et variables mobilisées
+
+Les résultats électoraux proviennent du classeur `Data/france-politique.fr-presidentielle-2022.xlsx`, feuille « Premier tour ». Les indicateurs démographiques et socio-économiques sont issus de `Data/donnees_sociaux_economiques_2023.csv`. Nous mobilisons l’ensemble des indicateurs socio-économiques disponibles : population, pauvreté, densité, caractéristiques du logement, niveau de vie, vieillissement, catégories socioprofessionnelles, activité, propriété, natalité, structure par âge et inscrits en 2022. Dans les résultats électoraux, nous ne conservons que les voix et le pourcentage obtenus par Emmanuel Macron.
+
+# Cadre méthodologique
+
+## Unité d’analyse et champ géographique
+
+L’unité statistique est le département. Le champ retenu comprend la France métropolitaine, Corse comprise. Les territoires ultramarins, collectivités particulières et Français de l’étranger sont exclus. Les fichiers sont fusionnés à partir du code département, après harmonisation de son format. Les indicateurs socio-économiques sont majoritairement datés de 2023, et le taux de natalité est daté de 2025. Ils fournissent un portrait proche de l’élection mais postérieur à celle-ci, et ne permettent donc pas, à eux seuls, d’établir une antériorité causale.
+
+## Variable d’intérêt et indicateurs
+
+La variable d’intérêt est `Macron_EXP`, part des suffrages exprimés obtenue par Emmanuel Macron au premier tour (en pourcentage). Les facteurs considérés sont les variables démographiques, économiques et résidentielles fournies dans le fichier socio-économique. Le nombre de voix obtenues par Emmanuel Macron (`Macron_VOIX`) complète son pourcentage de suffrages exprimés. Aucun résultat des autres candidats n’est inclus dans l’analyse.
+
+## Étapes de l’analyse
+
+Nous commençons par contrôler et fusionner les sources, puis présentons les statistiques univariées et la distribution spatiale du vote et de la population. L’analyse bivariée utilise des matrices de corrélation et des graphiques ciblés pour repérer les associations et les liens entre facteurs. Enfin, les VIF servent à diagnostiquer la multicolinéarité avant la modélisation. Ces statistiques descriptives constituent la première partie du projet et ne permettent pas encore de conclure à des effets causaux.
+
+# Analyse des données
+
+## Préparation et nettoyage
+
+Les résultats de Macron et les indicateurs socio-économiques sont rapprochés par code département. Les variables numériques sont converties depuis le format texte du CSV. Les contours départementaux sont convertis en objets `sf` pour réaliser les cartes avec `geom_sf()`.
+
+```{r preparation}
+election_brut <- read_excel("Data/france-politique.fr-presidentielle-2022.xlsx", sheet = "Premier tour")
+eco_brut <- read.csv("Data/donnees_sociaux_economiques_2023.csv", sep = ";", skip = 2,
+                     fileEncoding = "UTF-8-BOM", check.names = FALSE,
+                     na.strings = c("", "NA", "nd", "s"), colClasses = "character")
+
+eco <- eco_brut %>%
+  rename(code_dep = `Code`, departement = `Libellé`,
+         population = `Population municipale 2023`,
+         pauvrete = `Taux de pauvreté 2023`,
+         densite = `Densité de population (historique depuis 1876) 2023`,
+         part_res_principales = `Part des rés. principales dans le total des logements 2023`,
+         niveau_vie = `Médiane du niveau de vie 2023`,
+         vieillissement = `Indice de vieillissement 2023`,
+         logements_vacants = `Part des logements vacants dans le total des logements 2023`,
+         suroccupation = `Part des résidences principales en suroccupation accentuée 2023`,
+         cadres = `Pop 15 ans ou plus Cadres, Prof. intel. sup. 2023`,
+         activite = `Taux d'activité de 15 à 64 ans 2023`,
+         proprietaires = `Part des propriétaires dans les rés. principales 2023`,
+         natalite = `Taux de natalité 2025`,
+         moins_25 = `Part des pers. âgées de moins de 25 ans 2023`,
+         inscrits_2022 = `Électeurs inscrits sur liste principale 2022`) %>%
+  mutate(code_dep = trimws(code_dep))
+
+numeric_vars <- c("population", "pauvrete", "densite", "part_res_principales", "niveau_vie",
+                  "vieillissement", "logements_vacants", "suroccupation", "cadres",
+                  "activite", "proprietaires", "natalite", "moins_25", "inscrits_2022")
+eco[numeric_vars] <- lapply(eco[numeric_vars], function(x)
+  as.numeric(gsub(",", ".", gsub(" ", "", x, fixed = TRUE), fixed = TRUE)))
+
+election <- election_brut %>%
+  transmute(code_dep = trimws(as.character(DEP_CODE)),
+            code_dep = ifelse(grepl("^[0-9]+$", code_dep), sprintf("%02d", as.integer(code_dep)), code_dep),
+            Macron_VOIX = Macron_VOIX, Macron_EXP = Macron_EXP)
+
+metropole_codes <- c(sprintf("%02d", 1:19), "2A", "2B", sprintf("%02d", 21:95))
+donnees <- inner_join(filter(eco, code_dep %in% metropole_codes), election, by = "code_dep") %>%
+  filter(!is.na(Macron_EXP)) %>% arrange(code_dep)
+
+vars_analyse <- c(numeric_vars, "Macron_VOIX", "Macron_EXP")
+labels_vars <- c(Macron_EXP = "Emmanuel Macron (% des exprimés)", Macron_VOIX = "Voix pour Emmanuel Macron",
+  population = "Population municipale 2023", pauvrete = "Taux de pauvreté 2023 (%)",
+  densite = "Densité 2023", part_res_principales = "Résidences principales (%)",
+  niveau_vie = "Niveau de vie médian 2023 (€)", vieillissement = "Indice de vieillissement 2023",
+  logements_vacants = "Logements vacants (%)", suroccupation = "Suroccupation accentuée (%)",
+  cadres = "Cadres et professions intellectuelles supérieures (effectif)",
+  activite = "Taux d'activité 15–64 ans 2023 (%)", proprietaires = "Propriétaires (%)",
+  natalite = "Taux de natalité 2025", moins_25 = "Moins de 25 ans (%)",
+  inscrits_2022 = "Inscrits 2022")
 ```
 
-## Including Plots
+La fusion aboutit à **`r nrow(donnees)` départements**. Les statistiques descriptives incluent la population et l’ensemble des variables quantitatives présentes dans les deux sources. `Macron_EXP` correspond à la part des suffrages exprimés obtenue par Emmanuel Macron ; `Macron_VOIX` est son nombre de voix.
 
-You can also embed plots, for example:
+## Analyse descriptive univariée des données
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+Nous présentons les statistiques descriptives de tous les départements conservés et de l’ensemble des variables quantitatives disponibles. Le tableau comprend la population municipale, l’ensemble des variables socio-économiques, le nombre de voix pour Macron et sa part des suffrages exprimés.
+
+```{r stats-descriptives}
+resume <- donnees %>% select(all_of(vars_analyse)) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "valeur") %>%
+  group_by(variable) %>%
+  summarise(n = sum(!is.na(valeur)), moyenne = mean(valeur, na.rm = TRUE),
+            ecart_type = sd(valeur, na.rm = TRUE), minimum = min(valeur, na.rm = TRUE),
+            q1 = quantile(valeur, .25, na.rm = TRUE), mediane = median(valeur, na.rm = TRUE),
+            q3 = quantile(valeur, .75, na.rm = TRUE), maximum = max(valeur, na.rm = TRUE),
+            .groups = "drop") %>%
+  mutate(variable = ifelse(variable %in% names(labels_vars), unname(labels_vars[variable]), variable))
+knitr::kable(resume, digits = 2, caption = "Statistiques descriptives de toutes les variables quantitatives")
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+Le tableau donne une première vue de la dispersion du vote et des variables socio-économiques. La variable d'intérêt, `Macron_EXP`, mesure un pourcentage des suffrages exprimés. Sa moyenne départementale vaut **`r round(mean(donnees$Macron_EXP, na.rm=TRUE), 2)` %** ; elle varie de **`r round(min(donnees$Macron_EXP, na.rm=TRUE), 2)` %** à **`r round(max(donnees$Macron_EXP, na.rm=TRUE), 2)` %**. La moyenne est calculée sur les observations départementales sans pondération par le nombre d'électeurs.
+
+```{r boxplot-vote}
+ggplot(donnees, aes(y = Macron_EXP)) +
+  geom_boxplot(fill = "#6baed6", color = "#17365d") +
+  labs(title = "Graphique 1 : Boîte à moustaches du vote Macron par département",
+       y = "Part des suffrages exprimés (%)", x = "") +
+  theme_minimal()
+```
+
+```{r histogramme-vote}
+ggplot(donnees, aes(x = Macron_EXP)) +
+  geom_histogram(fill = "#3569a8", color = "white", binwidth = 2, boundary = 0) +
+  labs(title = "Graphique 2 : Distribution du vote Macron par département",
+       x = "Part des suffrages exprimés pour Emmanuel Macron (%)", y = "Nombre de départements") +
+  theme_minimal()
+```
+
+La boîte à moustaches et l'histogramme montrent la dispersion des résultats départementaux et permettent d'identifier d'éventuelles observations atypiques. Nous conservons tous les départements : les valeurs éloignées peuvent refléter une géographie électorale réelle. Le vote étant déjà exprimé en pourcentage et borné entre 0 et 100, une transformation logarithmique ne se justifie pas ici comme elle pouvait l'être pour un indice positif fortement asymétrique.
+
+## Analyse spatiale descriptive
+
+Les cartes montrent la répartition géographique du score d’Emmanuel Macron et de la population départementale. Les contours sont convertis en objets `sf` puis affichés avec `geom_sf()`.
+
+```{r cartes-departementales, fig.width=9, fig.height=6}
+normaliser_nom <- function(x) {
+  x <- iconv(x, from = "UTF-8", to = "ASCII//TRANSLIT")
+  gsub("[^a-z0-9]", "", tolower(x))
+}
+
+carte_france <- sf::st_as_sf(maps::map("france", plot = FALSE, fill = TRUE)) %>%
+  mutate(cle_dep = normaliser_nom(ID)) %>%
+  left_join(donnees %>% mutate(cle_dep = normaliser_nom(departement)) %>%
+              select(cle_dep, Macron_EXP, population), by = "cle_dep") %>%
+  sf::st_transform(2154)
+
+ggplot(carte_france) +
+  geom_sf(aes(fill = Macron_EXP), color = "white", linewidth = .15) +
+  scale_fill_viridis_c(option = "C", name = "Vote Macron
+(% exprimés)") +
+  labs(title = "Carte 1 : Vote pour Emmanuel Macron au premier tour de 2022") +
+  theme_void()
+
+ggplot(carte_france) +
+  geom_sf(aes(fill = population), color = "white", linewidth = .15) +
+  scale_fill_viridis_c(option = "B", trans = "sqrt",
+                       labels = scales::label_number(big.mark = " "), name = "Habitants") +
+  labs(title = "Carte 2 : Population municipale par département en 2023") +
+  theme_void()
+```
+
+Les cartes donnent une première lecture des contrastes spatiaux. La transformation par racine carrée sur la seconde carte rend la population plus lisible malgré les grands écarts entre départements.
+
+## Analyse descriptive bivariée des données
+
+Nous examinons ensuite les corrélations entre variables numériques, Les deux premières représentations donnent une vue d'ensemble : cercles colorés puis coefficients. Les corrélations sont descriptives et ne mesurent pas un effet causal.
+
+```{r matrice-correlation-cercle}
+vars_corr_completes <- c("Macron_EXP", numeric_vars)
+cor_full <- cor(donnees[vars_corr_completes], use = "pairwise.complete.obs")
+corrplot(cor_full, method = "circle", tl.cex = .65, mar = c(0, 0, 2, 0),
+         title = "Graphique 3 : Matrice de corrélation des variables numériques")
+```
+
+```{r matrice-correlation-nombres}
+corrplot(cor_full, method = "number", tl.cex = .65, number.cex = .55,
+         mar = c(0, 0, 2, 0), title = "Graphique 3 bis : Coefficients de corrélation")
+```
+
+La matrice rassemble le résultat de Macron et les indicateurs socio-économiques disponibles. Nous séparons ensuite les indicateurs de taille des caractéristiques sociales et résidentielles pour faciliter la lecture.
+
+```{r correlation-taille}
+vars_taille <- c("population", "densite", "cadres", "Macron_EXP")
+corrplot(cor(donnees[vars_taille], use = "pairwise.complete.obs"), method = "number",
+         tl.cex = .8, number.cex = .8, order = "hclust", addrect = 2,
+         title = "Graphique 4 : Population, densité, cadres et variables électorales", mar = c(0,0,2,0))
+```
+
+```{r correlation-sociale}
+vars_sociales <- c("pauvrete", "niveau_vie", "cadres", "activite", "moins_25", "vieillissement")
+corrplot(cor(donnees[vars_sociales], use = "pairwise.complete.obs"), method = "number",
+         tl.cex = .8, number.cex = .8, order = "hclust", addrect = 2,
+         title = "Graphique 5 : Corrélations entre caractéristiques socio-économiques", mar = c(0,0,2,0))
+```
+
+```{r correlation-vote}
+vars_vote <- c("Macron_EXP", "population", "niveau_vie", "pauvrete",
+               "vieillissement", "cadres", "activite", "densite")
+corrplot(cor(donnees[vars_vote], use = "pairwise.complete.obs"), method = "number",
+         tl.cex = .75, number.cex = .7, order = "hclust", addrect = 2,
+         title = "Graphique 6 : Vote Macron et facteurs socio-économiques", mar = c(0,0,2,0))
+```
+
+Le graphique 6 cible la question de l’étude. Les coefficients permettent de repérer les facteurs qui varient avec le score de Macron et ceux qui sont également liés entre eux. Ils décrivent une association linéaire à l'échelle départementale ; ils ne permettent pas d'affirmer que ces facteurs influencent le choix individuel des électeurs.
+
+On complète ces matrices par des nuages de points, afin de vérifier visuellement la forme des relations et de repérer les départements qui pourraient peser fortement sur la corrélation.
+
+```{r nuages-vote}
+facteurs_vote <- c("niveau_vie", "pauvrete", "vieillissement", "densite", "cadres", "activite", "moins_25")
+labels_nuages <- c(niveau_vie = "Niveau de vie médian (€)", pauvrete = "Taux de pauvreté (%)",
+  vieillissement = "Indice de vieillissement", densite = "Densité de population",
+  cadres = "Effectif de cadres", activite = "Taux d'activité (%)",
+  moins_25 = "Part des moins de 25 ans (%)")
+nuages <- donnees %>% select(Macron_EXP, all_of(facteurs_vote)) %>%
+  pivot_longer(-Macron_EXP, names_to = "facteur", values_to = "valeur") %>%
+  mutate(facteur = factor(facteur, levels = facteurs_vote, labels = labels_nuages[facteurs_vote]))
+ggplot(nuages, aes(valeur, Macron_EXP)) +
+  geom_point(color = "#3569a8", alpha = .8) +
+  geom_smooth(method = "lm", formula = y ~ x, se = FALSE, color = "#b64b4b") +
+  facet_wrap(~ facteur, scales = "free_x", ncol = 2) +
+  labs(title = "Graphique 7 : Vote Macron en fonction des principaux facteurs",
+       x = "Facteur (échelle propre à chaque panneau)", y = "Vote Macron (% des exprimés)") +
+  theme_minimal()
+```
+
+Enfin, nous évaluons la multicolinéarité des variables explicatives au moyen des facteurs d'inflation de variance (VIF). Le modèle auxiliaire porte sur les caractéristiques socio-économiques retenues.
+
+```{r vif}
+modele_vif <- lm(Macron_EXP ~ population + pauvrete + densite + part_res_principales +
+  niveau_vie + vieillissement + logements_vacants + suroccupation + cadres + activite +
+  proprietaires + moins_25 + natalite + inscrits_2022, data = donnees)
+car::vif(modele_vif)
+```
+
+Un VIF élevé signale qu'une variable explicative est fortement prédite par les autres ; il ne constitue pas à lui seul une raison automatique de supprimer une variable. Nous utiliserons ces éléments pour guider la spécification des modèles ultérieurs.
+
+## Synthèse de cette première partie
+
+Cette première partie établit les ordres de grandeur, les contrastes spatiaux de population et de vote Macron ainsi que les associations brutes avec les facteurs socio-économiques. Elle prépare la suite du projet, qui pourra approfondir ces constats par des méthodes explicatives et spatiales. La moyenne non pondérée ne représente pas le vote d'un électeur moyen. Les indicateurs socio-économiques de 2023 sont postérieurs à l'élection de 2022. Enfin, une relation au niveau départemental ne permet pas de conclure sur le comportement individuel des électeurs (risque d'erreur écologique) ; les corrélations ne suffisent pas à identifier une influence causale.
